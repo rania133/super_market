@@ -133,7 +133,7 @@ exports.confirmPayment = async (req, res) => {
       receiptQRCode: qrCodeDataURL, // Send the QR code back in the response
     });
   } catch (error) {
-    console.error('Confirm Payment Error:', error);
+    console.error('Confirm Payment Error:', error); 
     res.status(500).json({ message: 'Server error' });
   }
 };
