@@ -6,6 +6,7 @@ const QRCode = require('qrcode');
 const Product = require('../models/productSchema');
 const Cart = require('../models/CartSchema');
 const User = require('../models/userSchema'); 
+const Receipt = require('../models/receiptSchema')
 
 // Modified: This function now handles creating a customer, saving card info, and creating a payment.
 exports.createStripePayment = async (req, res) => {
@@ -76,56 +77,73 @@ exports.createStripePayment = async (req, res) => {
   }
 };
 
-
-// 2- Confirm Payment after success (No changes needed here)
 exports.confirmPayment = async (req, res) => {
-  try {
-    const { paymentId } = req.body;
-    const payment = await Payment.findById(paymentId).populate('products.product');
+    try {
+        // Check if the user is authenticated. If not, req.user will be undefined.
+        if (!req.user) {
+            // This error tells the client that they need to be logged in.
+            return res.status(401).json({ message: 'Authentication error: User not logged in.' });
+        }
 
-    if (!payment) {
-      return res.status(404).json({ message: 'Payment not found' });
-    }
+        const { paymentId } = req.body;
+        // Now it's safe to access req.user.id
+        const userId = req.user.id; 
 
-    // Check and update product stock
-    for (const item of payment.products) {
-      const quantityPurchased = item.quantity;
-      const product = item.product;
+        const payment = await Payment.findById(paymentId).populate('products.product');
 
-      if (product.stock < quantityPurchased) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
-      }
+        if (!payment) {
+            return res.status(404).json({ message: 'Payment not found' });
+        }
 
-      product.stock -= quantityPurchased;
-      await product.save();
-    }
+        // Security check: Ensure the user owns this payment
+        if (payment.user.toString() !== userId) {
+            return res.status(401).json({ message: 'Not authorized for this payment' });
+        }
 
-    // Update payment status
-    payment.paymentStatus = 'paid';
+        // Check and update product stock
+        for (const item of payment.products) {
+            const product = item.product;
+            if (product.stock < item.quantity) {
+                return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+            }
+            product.stock -= item.quantity;
+            await product.save();
+        }
 
-    // Prepare receipt data
-    const receipt = {
-      products: payment.products.map(item => ({
-        name: item.product.name,
-        price: item.product.price,
-        quantity: item.quantity,
-      })),
-      totalAmount: payment.totalAmount,
-      paidAt: payment.updatedAt, // Or a new Date() if you prefer the exact confirmation time
-      paymentId: payment._id.toString(),
-    };
+        // Update payment status
+        payment.paymentStatus = 'paid';
+        
+        // --- START: Changes for QR code and response ---
 
-    // Convert receipt to stringified JSON for QR
-    const qrData = JSON.stringify(receipt);
+        // 1. First, create the receipt document to get its unique _id
+        const newReceipt = new Receipt({
+            userId: userId,
+            paymentId: payment._id,
+            products: payment.products.map(item => ({
+                name: item.product.name,
+                price: item.product.price,
+                quantity: item.quantity,
+            })),
+            totalAmount: payment.totalAmount,
+            paidAt: new Date(),
+        });
+        
+        // 2. Generate the QR code using the new receipt's ID
+        const qrData = JSON.stringify({ receiptId: newReceipt._id });
+        const qrCodeDataURL = await QRCode.toDataURL(qrData);
 
-    // Generate QR Code as Data URL for the receipt
-    const qrCodeDataURL = await QRCode.toDataURL(qrData);
-    payment.receiptQRCode = qrCodeDataURL; // Store the QR code in the payment document
+        // 3. Save the QR code to both the receipt and the payment documents
+        newReceipt.receiptQRCode = qrCodeDataURL;
+        payment.receiptQRCode = qrCodeDataURL;
 
-    await payment.save();
+        // 4. Save both updated documents
+        await newReceipt.save();
+        await payment.save();
+        
+        // --- END: Changes for QR code and response ---
 
-    // Clear the user's cart after successful payment
-    await Cart.findOneAndDelete({ userId: payment.user });
+        // Clear the user's cart
+        await Cart.findOneAndDelete({ userId: payment.user });
 
     res.status(200).json({
       message: 'Payment confirmed and receipt generated successfully!',
@@ -133,7 +151,7 @@ exports.confirmPayment = async (req, res) => {
       receiptQRCode: qrCodeDataURL, // Send the QR code back in the response
     });
   } catch (error) {
-    console.error('Confirm Payment Error:', error); 
+    console.error('Confirm Payment Error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
